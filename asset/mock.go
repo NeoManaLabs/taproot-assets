@@ -6,13 +6,16 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"slices"
 	"testing"
 
 	"github.com/btcsuite/btcd/btcec/v2"
 	"github.com/btcsuite/btcd/btcec/v2/schnorr"
+	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/btcsuite/btcd/txscript"
 	"github.com/btcsuite/btcd/wire"
 	"github.com/lightninglabs/lndclient"
+	"github.com/lightninglabs/taproot-assets/fn"
 	"github.com/lightninglabs/taproot-assets/internal/test"
 	"github.com/lightninglabs/taproot-assets/mssmt"
 	"github.com/lightningnetwork/lnd/input"
@@ -149,6 +152,14 @@ func CheckAssetAsserts(a *Asset, checks ...AssetAssert) error {
 	}
 
 	return nil
+}
+
+// SortFunc is used to sort assets lexicographically by their script keys.
+func SortFunc(a, b *Asset) int {
+	return bytes.Compare(
+		a.ScriptKey.PubKey.SerializeCompressed(),
+		b.ScriptKey.PubKey.SerializeCompressed(),
+	)
 }
 
 // RandGenesis creates a random genesis for testing.
@@ -606,9 +617,14 @@ func NewAssetNoErr(t testing.TB, gen Genesis, amt, locktime, relocktime uint64,
 }
 
 func NewGroupKeyRequestNoErr(t testing.TB, internalKey keychain.KeyDescriptor,
-	gen Genesis, newAsset *Asset, scriptRoot []byte) *GroupKeyRequest {
+	externalKey fn.Option[ExternalKey], gen Genesis, newAsset *Asset,
+	scriptRoot []byte,
+	customTapscriptRoot fn.Option[chainhash.Hash]) *GroupKeyRequest {
 
-	req, err := NewGroupKeyRequest(internalKey, gen, newAsset, scriptRoot)
+	req, err := NewGroupKeyRequest(
+		internalKey, externalKey, gen, newAsset, scriptRoot,
+		customTapscriptRoot,
+	)
 	require.NoError(t, err)
 
 	return req
@@ -658,6 +674,55 @@ func RandAssetWithValues(t testing.TB, genesis Genesis, groupKey *GroupKey,
 		t, genesis, uint64(units), 0, 0, scriptKey, groupKey,
 		WithAssetVersion(assetVersion),
 	)
+}
+
+// RandAltLeaf generates a random Asset that is a valid AltLeaf.
+func RandAltLeaf(t testing.TB) *Asset {
+	randWitness := []Witness{
+		{TxWitness: test.RandTxWitnesses(t)},
+	}
+	randKey := RandScriptKey(t)
+	randVersion := ScriptVersion(test.RandInt[uint16]())
+	randLeaf, err := NewAltLeaf(randKey, randVersion, randWitness)
+	require.NoError(t, err)
+	require.NoError(t, randLeaf.ValidateAltLeaf())
+
+	return randLeaf
+}
+
+// RandAltLeaves generates a random number of random alt leaves.
+func RandAltLeaves(t testing.TB, nonZero bool) []*Asset {
+	// Limit the number of leaves to keep test vectors small.
+	maxLeaves := 4
+	numLeaves := test.RandIntn(maxLeaves)
+	if nonZero {
+		numLeaves += 1
+	}
+
+	if numLeaves == 0 {
+		return nil
+	}
+
+	altLeaves := make([]*Asset, numLeaves)
+	for idx := range numLeaves {
+		altLeaves[idx] = RandAltLeaf(t)
+	}
+
+	return altLeaves
+}
+
+// CompareAltLeaves compares two slices of AltLeafAssets for equality.
+func CompareAltLeaves(t *testing.T, a, b []AltLeaf[Asset]) {
+	require.Equal(t, len(a), len(b))
+
+	aInner := FromAltLeaves(a)
+	bInner := FromAltLeaves(b)
+
+	slices.SortStableFunc(aInner, SortFunc)
+	slices.SortStableFunc(bInner, SortFunc)
+	for idx := range aInner {
+		require.True(t, aInner[idx].DeepEqual(bInner[idx]))
+	}
 }
 
 type ValidTestCase struct {

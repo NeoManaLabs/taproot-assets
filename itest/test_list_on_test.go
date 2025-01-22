@@ -38,6 +38,10 @@ var testCases = []*testCase{
 		test: testMintFundSealAssets,
 	},
 	{
+		name: "mint external group key chantools",
+		test: testMintExternalGroupKeyChantools,
+	},
+	{
 		name: "mint asset decimal display",
 		test: testMintAssetWithDecimalDisplayMetaField,
 	},
@@ -252,6 +256,10 @@ var testCases = []*testCase{
 	{
 		name: "multi input psbt single asset id",
 		test: testMultiInputPsbtSingleAssetID,
+	},
+	{
+		name: "psbt alt leaf anchoring",
+		test: testPsbtInteractiveAltLeafAnchoring,
 	},
 	{
 		name: "universe REST API",

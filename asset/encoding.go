@@ -809,7 +809,10 @@ func DecodeTapLeaf(leafData []byte) (*txscript.TapLeaf, error) {
 }
 
 func AltLeavesEncoder(w io.Writer, val any, buf *[8]byte) error {
-	if t, ok := val.(*[]AltLeaf[*Asset]); ok {
+	if t, ok := val.(*[]AltLeaf[Asset]); ok {
+		// If the AltLeaves slice is empty, we will still encode its
+		// length here (as 0). Callers should avoid encoding empty
+		// AltLeaves slices.
 		if err := tlv.WriteVarInt(w, uint64(len(*t)), buf); err != nil {
 			return err
 		}
@@ -852,7 +855,7 @@ func AltLeavesDecoder(r io.Reader, val any, buf *[8]byte, l uint64) error {
 		return tlv.ErrRecordTooLarge
 	}
 
-	if typ, ok := val.(*[]AltLeaf[*Asset]); ok {
+	if typ, ok := val.(*[]AltLeaf[Asset]); ok {
 		// Each alt leaf is at least 42 bytes, which limits the total
 		// number of aux leaves. So we don't need to enforce a strict
 		// limit here.
@@ -861,7 +864,7 @@ func AltLeavesDecoder(r io.Reader, val any, buf *[8]byte, l uint64) error {
 			return err
 		}
 
-		leaves := make([]AltLeaf[*Asset], 0, numItems)
+		leaves := make([]AltLeaf[Asset], 0, numItems)
 		leafKeys := make(map[SerializedKey]struct{})
 		for i := uint64(0); i < numItems; i++ {
 			var streamBytes []byte
@@ -887,11 +890,63 @@ func AltLeavesDecoder(r io.Reader, val any, buf *[8]byte, l uint64) error {
 			}
 
 			leafKeys[leafKey] = struct{}{}
-			leaves = append(leaves, AltLeaf[*Asset](&leaf))
+			leaves = append(leaves, AltLeaf[Asset](&leaf))
 		}
 
 		*typ = leaves
 		return nil
 	}
 	return tlv.NewTypeForEncodingErr(val, "[]*AltLeaf")
+}
+
+func GroupKeyRevealEncoder(w io.Writer, val any, _ *[8]byte) error {
+	if t, ok := val.(*GroupKeyReveal); ok {
+		if err := (*t).Encode(w); err != nil {
+			return fmt.Errorf("unable to encode group key "+
+				"reveal: %w", err)
+		}
+
+		return nil
+	}
+
+	return tlv.NewTypeForEncodingErr(val, "GroupKeyReveal")
+}
+
+func GroupKeyRevealDecoder(r io.Reader, val any, buf *[8]byte, l uint64) error {
+	// Return early if the val is not a pointer to a GroupKeyReveal.
+	typ, ok := val.(*GroupKeyReveal)
+	if !ok {
+		return tlv.NewTypeForEncodingErr(val, "GroupKeyReveal")
+	}
+
+	// If the length is less than or equal to the sum of the lengths of the
+	// internal key and the tapscript root, then we'll attempt to decode it
+	// as a GroupKeyRevealV0.
+	internalKeyLen := uint64(btcec.PubKeyBytesLenCompressed)
+	tapscriptRootLen := uint64(sha256.Size)
+
+	if l <= internalKeyLen+tapscriptRootLen {
+		// Attempt decoding with GroupKeyRevealV0.
+		var gkrV0 GroupKeyRevealV0
+
+		err := gkrV0.Decode(r, buf, l)
+		if err != nil {
+			return fmt.Errorf("group key reveal V0 decode "+
+				"error: %w", err)
+		}
+
+		*typ = &gkrV0
+		return nil
+	}
+
+	// Attempt decoding with GroupKeyRevealV1.
+	var gkrV1 GroupKeyRevealV1
+
+	err := gkrV1.Decode(r, buf, l)
+	if err != nil {
+		return fmt.Errorf("group key reveal V1 decode error: %w", err)
+	}
+
+	*typ = &gkrV1
+	return nil
 }

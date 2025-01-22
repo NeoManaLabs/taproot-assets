@@ -4,11 +4,13 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/binary"
 	"fmt"
 
 	"github.com/btcsuite/btcd/blockchain"
 	"github.com/btcsuite/btcd/btcec/v2"
 	"github.com/btcsuite/btcd/btcec/v2/schnorr"
+	"github.com/btcsuite/btcd/btcutil/hdkeychain"
 	"github.com/btcsuite/btcd/txscript"
 	"github.com/btcsuite/btcd/wire"
 	"github.com/lightninglabs/taproot-assets/asset"
@@ -19,6 +21,7 @@ import (
 	"github.com/lightninglabs/taproot-assets/rfqmsg"
 	"github.com/lightninglabs/taproot-assets/taprpc/rfqrpc"
 	"github.com/lightningnetwork/lnd/keychain"
+	"github.com/lightningnetwork/lnd/lntest"
 )
 
 // Shorthand for the asset transfer output proof delivery status enum.
@@ -292,8 +295,19 @@ func UnmarshalGroupKeyRequest(req *GroupKeyRequest) (*asset.GroupKeyRequest,
 		return nil, err
 	}
 
+	var externalKey fn.Option[asset.ExternalKey]
+	if req.ExternalKey != nil {
+		key, err := UnmarshalExternalKey(req.ExternalKey)
+		if err != nil {
+			return nil, err
+		}
+
+		externalKey = fn.Some(key)
+	}
+
 	return &asset.GroupKeyRequest{
 		RawKey:        rawKey,
+		ExternalKey:   externalKey,
 		AnchorGen:     *anchorGen,
 		TapscriptRoot: req.TapscriptRoot,
 		NewAsset:      &newAsset,
@@ -316,13 +330,96 @@ func MarshalGroupKeyRequest(req *asset.GroupKeyRequest) (*GroupKeyRequest,
 		return nil, err
 	}
 
+	// Marshal the external key into the RPC format.
+	externalKey := fn.MapOptionZ(req.ExternalKey, MarshalExternalKey)
+
+	// Marshal raw key into RPC format.
+	//
+	// We only need to marshal the raw key if the external key is not set.
+	var rawKey *KeyDescriptor
+	if req.ExternalKey.IsNone() {
+		rawKey = MarshalKeyDescriptor(req.RawKey)
+	}
+
 	return &GroupKeyRequest{
-		RawKey: MarshalKeyDescriptor(req.RawKey),
+		RawKey: rawKey,
 		AnchorGenesis: MarshalGenesisInfo(
 			&req.AnchorGen, req.NewAsset.Type,
 		),
 		TapscriptRoot: req.TapscriptRoot,
 		NewAsset:      assetBuf.Bytes(),
+		ExternalKey:   externalKey,
+	}, nil
+}
+
+// MarshalExternalKey marshals an external key into its RPC counterpart.
+func MarshalExternalKey(key asset.ExternalKey) *ExternalKey {
+	var masterFingerprint [4]byte
+	binary.LittleEndian.PutUint32(
+		masterFingerprint[:], key.MasterFingerprint,
+	)
+
+	// The first three elements of the derivation path are hardened, so to
+	// format we need to subtract the hardened key offset again.
+	path := key.DerivationPath
+	purpose := path[0] - hdkeychain.HardenedKeyStart
+	coinType := path[1] - hdkeychain.HardenedKeyStart
+	account := path[2] - hdkeychain.HardenedKeyStart
+	internalExternalAddr := path[3]
+	addrIndex := path[4]
+
+	derivationPathStr := fmt.Sprintf("m/%d'/%d'/%d'/%d/%d", purpose,
+		coinType, account, internalExternalAddr, addrIndex)
+
+	return &ExternalKey{
+		Xpub:              key.XPub.String(),
+		MasterFingerprint: masterFingerprint[:],
+		DerivationPath:    derivationPathStr,
+	}
+}
+
+// UnmarshalExternalKey parses an external key from the RPC variant.
+func UnmarshalExternalKey(rpcKey *ExternalKey) (asset.ExternalKey, error) {
+	if rpcKey == nil {
+		return asset.ExternalKey{}, fmt.Errorf("unexpected nil RPC " +
+			"external key")
+	}
+
+	// Parse xpub.
+	xpub, err := hdkeychain.NewKeyFromString(rpcKey.Xpub)
+	if err != nil {
+		return asset.ExternalKey{}, err
+	}
+
+	// Parse derivation path.
+	path, err := lntest.ParseDerivationPath(rpcKey.DerivationPath)
+	if err != nil {
+		return asset.ExternalKey{}, err
+	}
+
+	// We assume the first three elements of the derivation path are
+	// hardened, so we need to add the hardened key offset.
+	for i := 0; i < 3; i++ {
+		path[i] += hdkeychain.HardenedKeyStart
+	}
+
+	// Parse master fingerprint.
+	var masterFingerprint uint32
+	if len(rpcKey.MasterFingerprint) > 0 {
+		if len(rpcKey.MasterFingerprint) != 4 {
+			return asset.ExternalKey{}, fmt.Errorf("master " +
+				"fingerprint must be 4 bytes")
+		}
+
+		masterFingerprint = binary.LittleEndian.Uint32(
+			rpcKey.MasterFingerprint,
+		)
+	}
+
+	return asset.ExternalKey{
+		XPub:              *xpub,
+		MasterFingerprint: masterFingerprint,
+		DerivationPath:    path,
 	}, nil
 }
 
@@ -547,13 +644,18 @@ func MarshalAcceptedSellQuote(
 		accept.Request.PaymentMaxAmt, accept.AssetRate.Rate,
 	)
 
+	minTransportableMSat := rfqmath.MinTransportableMSat(
+		rfqmath.DefaultOnChainHtlcMSat, accept.AssetRate.Rate,
+	)
+
 	return &rfqrpc.PeerAcceptedSellQuote{
-		Peer:         accept.Peer.String(),
-		Id:           accept.ID[:],
-		Scid:         uint64(accept.ShortChannelId()),
-		BidAssetRate: rpcAssetRate,
-		Expiry:       uint64(accept.AssetRate.Expiry.Unix()),
-		AssetAmount:  numAssetUnits.ScaleTo(0).ToUint64(),
+		Peer:                 accept.Peer.String(),
+		Id:                   accept.ID[:],
+		Scid:                 uint64(accept.ShortChannelId()),
+		BidAssetRate:         rpcAssetRate,
+		Expiry:               uint64(accept.AssetRate.Expiry.Unix()),
+		AssetAmount:          numAssetUnits.ScaleTo(0).ToUint64(),
+		MinTransportableMsat: uint64(minTransportableMSat),
 	}
 }
 
@@ -563,16 +665,24 @@ func MarshalAcceptedBuyQuoteEvent(
 	event *rfq.PeerAcceptedBuyQuoteEvent) (*rfqrpc.PeerAcceptedBuyQuote,
 	error) {
 
+	// We now calculate the minimum amount of asset units that can be
+	// transported within a single HTLC for this asset at the given rate.
+	// This corresponds to the 354 satoshi minimum non-dust HTLC value.
+	minTransportableUnits := rfqmath.MinTransportableUnits(
+		rfqmath.DefaultOnChainHtlcMSat, event.AssetRate.Rate,
+	).ScaleTo(0).ToUint64()
+
 	return &rfqrpc.PeerAcceptedBuyQuote{
-		Peer:        event.Peer.String(),
-		Id:          event.ID[:],
-		Scid:        uint64(event.ShortChannelId()),
-		AssetAmount: event.Request.AssetMaxAmt,
+		Peer:           event.Peer.String(),
+		Id:             event.ID[:],
+		Scid:           uint64(event.ShortChannelId()),
+		AssetMaxAmount: event.Request.AssetMaxAmt,
 		AskAssetRate: &rfqrpc.FixedPoint{
 			Coefficient: event.AssetRate.Rate.Coefficient.String(),
 			Scale:       uint32(event.AssetRate.Rate.Scale),
 		},
-		Expiry: uint64(event.AssetRate.Expiry.Unix()),
+		Expiry:                uint64(event.AssetRate.Expiry.Unix()),
+		MinTransportableUnits: minTransportableUnits,
 	}, nil
 }
 

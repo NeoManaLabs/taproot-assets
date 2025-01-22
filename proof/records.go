@@ -27,6 +27,7 @@ const (
 	BlockHeightType      tlv.Type = 22
 	GenesisRevealType    tlv.Type = 23
 	GroupKeyRevealType   tlv.Type = 25
+	AltLeavesType        tlv.Type = 27
 
 	TaprootProofOutputIndexType     tlv.Type = 0
 	TaprootProofInternalKeyType     tlv.Type = 2
@@ -53,7 +54,7 @@ var KnownProofTypes = fn.NewSet(
 	TxMerkleProofType, AssetLeafType, InclusionProofType,
 	ExclusionProofsType, SplitRootProofType, MetaRevealType,
 	AdditionalInputsType, ChallengeWitnessType, BlockHeightType,
-	GenesisRevealType, GroupKeyRevealType,
+	GenesisRevealType, GroupKeyRevealType, AltLeavesType,
 )
 
 // KnownTaprootProofTypes is a set of all known Taproot proof TLV types. This
@@ -379,17 +380,42 @@ func GenesisRevealRecord(genesis **asset.Genesis) tlv.Record {
 }
 
 func GroupKeyRevealRecord(reveal *asset.GroupKeyReveal) tlv.Record {
+	// recordSize returns the size of the record in bytes. This is used to
+	// determine the size of the record when encoding it.
 	recordSize := func() uint64 {
 		if reveal == nil || *reveal == nil {
 			return 0
 		}
-		r := *reveal
-		return uint64(
-			btcec.PubKeyBytesLenCompressed + len(r.TapscriptRoot()),
+
+		var (
+			b   bytes.Buffer
+			buf [8]byte
 		)
+		err := asset.GroupKeyRevealEncoder(&b, reveal, &buf)
+		if err != nil {
+			panic(err)
+		}
+
+		return uint64(len(b.Bytes()))
+	}
+
+	return tlv.MakeDynamicRecord(
+		GroupKeyRevealType, reveal, recordSize,
+		asset.GroupKeyRevealEncoder, asset.GroupKeyRevealDecoder,
+	)
+}
+
+func AltLeavesRecord(leaves *[]asset.AltLeaf[asset.Asset]) tlv.Record {
+	sizeFunc := func() uint64 {
+		var buf bytes.Buffer
+		err := asset.AltLeavesEncoder(&buf, leaves, &[8]byte{})
+		if err != nil {
+			panic(err)
+		}
+		return uint64(len(buf.Bytes()))
 	}
 	return tlv.MakeDynamicRecord(
-		GroupKeyRevealType, reveal, recordSize, GroupKeyRevealEncoder,
-		GroupKeyRevealDecoder,
+		AltLeavesType, leaves, sizeFunc, asset.AltLeavesEncoder,
+		asset.AltLeavesDecoder,
 	)
 }

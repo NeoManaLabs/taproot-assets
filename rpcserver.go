@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -20,6 +21,7 @@ import (
 	"github.com/btcsuite/btcd/btcec/v2/schnorr"
 	"github.com/btcsuite/btcd/btcutil"
 	"github.com/btcsuite/btcd/btcutil/psbt"
+	"github.com/btcsuite/btcd/chaincfg"
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/btcsuite/btcd/wire"
 	"github.com/btcsuite/btcwallet/wtxmgr"
@@ -55,6 +57,7 @@ import (
 	"github.com/lightningnetwork/lnd/keychain"
 	"github.com/lightningnetwork/lnd/lnrpc"
 	"github.com/lightningnetwork/lnd/lnrpc/invoicesrpc"
+	"github.com/lightningnetwork/lnd/lnrpc/routerrpc"
 	"github.com/lightningnetwork/lnd/lnrpc/walletrpc"
 	"github.com/lightningnetwork/lnd/lntypes"
 	"github.com/lightningnetwork/lnd/lnwallet/chainfee"
@@ -580,6 +583,13 @@ func (r *rpcServer) MintAsset(ctx context.Context,
 		groupTapscriptRoot = bytes.Clone(req.Asset.GroupTapscriptRoot)
 	}
 
+	if req.Asset.ExternalGroupKey != nil &&
+		req.Asset.GroupInternalKey != nil {
+
+		return nil, fmt.Errorf("cannot set both external group key " +
+			"and group internal key descriptor")
+	}
+
 	seedling := &tapgarden.Seedling{
 		AssetVersion:   assetVersion,
 		AssetType:      asset.Type(req.Asset.AssetType),
@@ -605,6 +615,31 @@ func (r *rpcServer) MintAsset(ctx context.Context,
 		seedling.GroupTapscriptRoot = groupTapscriptRoot
 	}
 
+	if req.Asset.ExternalGroupKey != nil {
+		externalKey, err := taprpc.UnmarshalExternalKey(
+			req.Asset.ExternalGroupKey,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("unable to parse external key: "+
+				"%w", err)
+		}
+
+		if err := externalKey.Validate(); err != nil {
+			return nil, fmt.Errorf("invalid external key: %w", err)
+		}
+
+		internalKey, err := externalKey.PubKey()
+		if err != nil {
+			return nil, fmt.Errorf("unable to derive internal "+
+				"group key from xpub: %w", err)
+		}
+
+		seedling.ExternalKey = fn.Some(externalKey)
+		seedling.GroupInternalKey = &keychain.KeyDescriptor{
+			PubKey: &internalKey,
+		}
+	}
+
 	switch {
 	// If a group key is provided, parse the provided group public key
 	// before creating the asset seedling.
@@ -627,7 +662,7 @@ func (r *rpcServer) MintAsset(ctx context.Context,
 			},
 		}
 
-	// If a group anchor is provided, propoate the name to the seedling.
+	// If a group anchor is provided, propagate the name to the seedling.
 	// We cannot do any name validation from outside the minter.
 	case specificGroupAnchor:
 		seedling.GroupAnchor = &req.Asset.GroupAnchor
@@ -714,22 +749,23 @@ func (r *rpcServer) FundBatch(ctx context.Context,
 		return nil, err
 	}
 
-	batch, err := r.cfg.AssetMinter.FundBatch(
-		tapgarden.FundParams{
-			FeeRate:        feeRateOpt,
-			SiblingTapTree: tapTreeOpt,
-		},
-	)
+	fundBatchResp, err := r.cfg.AssetMinter.FundBatch(tapgarden.FundParams{
+		FeeRate:        feeRateOpt,
+		SiblingTapTree: tapTreeOpt,
+	})
 	if err != nil {
 		return nil, fmt.Errorf("unable to fund batch: %w", err)
 	}
 
 	// If there was no batch to fund, return an empty response.
-	if batch == nil {
+	if fundBatchResp.Batch == nil {
 		return &mintrpc.FundBatchResponse{}, nil
 	}
 
-	rpcBatch, err := marshalMintingBatch(batch, req.ShortResponse)
+	rpcBatch, err := marshalVerboseBatch(
+		*r.cfg.ChainParams.Params, fundBatchResp.Batch,
+		!req.ShortResponse, req.ShortResponse,
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -886,7 +922,10 @@ func (r *rpcServer) ListBatches(_ context.Context,
 		batches, func(b *tapgarden.VerboseBatch) (*mintrpc.VerboseBatch,
 			error) {
 
-			return marshalVerboseBatch(b, req.Verbose, false)
+			return marshalVerboseBatch(
+				*r.cfg.ChainParams.Params, b, req.Verbose,
+				false,
+			)
 		},
 	)
 	if err != nil {
@@ -1701,6 +1740,7 @@ func (r *rpcServer) marshalProof(ctx context.Context, p *proof.Proof,
 		txMerkleProof  = p.TxMerkleProof
 		inclusionProof = p.InclusionProof
 		splitRootProof = p.SplitRootProof
+		altLeaves      = p.AltLeaves
 	)
 
 	var txMerkleProofBuf bytes.Buffer
@@ -1755,6 +1795,19 @@ func (r *rpcServer) marshalProof(ctx context.Context, p *proof.Proof,
 		if err != nil {
 			return nil, fmt.Errorf("unable to encode split root "+
 				"proof: %w", err)
+		}
+	}
+
+	var altLeavesBuf bytes.Buffer
+	if len(altLeaves) > 0 {
+		var scratch [8]byte
+
+		err := asset.AltLeavesEncoder(
+			&altLeavesBuf, &altLeaves, &scratch,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("unable to encode alt leaves: "+
+				"%w", err)
 		}
 	}
 
@@ -1837,6 +1890,7 @@ func (r *rpcServer) marshalProof(ctx context.Context, p *proof.Proof,
 		IsBurn:              p.Asset.IsBurn(),
 		GenesisReveal:       genesisReveal,
 		GroupKeyReveal:      &GroupKeyReveal,
+		AltLeaves:           altLeavesBuf.Bytes(),
 	}, nil
 }
 
@@ -4079,8 +4133,8 @@ func marshalSendEvent(event fn.Event) (*taprpc.SendEvent, error) {
 }
 
 // marshalVerboseBatch marshals a minting batch into the RPC counterpart.
-func marshalVerboseBatch(batch *tapgarden.VerboseBatch, verbose bool,
-	skipSeedlings bool) (*mintrpc.VerboseBatch, error) {
+func marshalVerboseBatch(params chaincfg.Params, batch *tapgarden.VerboseBatch,
+	verbose bool, skipSeedlings bool) (*mintrpc.VerboseBatch, error) {
 
 	rpcMintingBatch, err := marshalMintingBatch(
 		batch.MintingBatch, skipSeedlings,
@@ -4102,7 +4156,7 @@ func marshalVerboseBatch(batch *tapgarden.VerboseBatch, verbose bool,
 	// We only need to convert the seedlings to unsealed seedlings.
 	if len(batch.UnsealedSeedlings) > 0 {
 		rpcBatch.UnsealedAssets, err = marshalUnsealedSeedlings(
-			verbose, batch.UnsealedSeedlings,
+			params, verbose, batch.UnsealedSeedlings,
 		)
 		if err != nil {
 			return nil, err
@@ -4249,13 +4303,14 @@ func marshalSeedling(seedling *tapgarden.Seedling) (*mintrpc.PendingAsset,
 
 // marshalUnsealedSeedling marshals an unsealed seedling into the RPC
 // counterpart.
-func marshalUnsealedSeedling(verbose bool,
+func marshalUnsealedSeedling(params chaincfg.Params, verbose bool,
 	seedling *tapgarden.UnsealedSeedling) (*mintrpc.UnsealedAsset, error) {
 
 	var (
-		groupVirtualTx *taprpc.GroupVirtualTx
-		groupReq       *taprpc.GroupKeyRequest
-		err            error
+		groupVirtualTx   *taprpc.GroupVirtualTx
+		groupReq         *taprpc.GroupKeyRequest
+		groupVirtualPsbt string
+		err              error
 	)
 
 	rpcSeedling, err := marshalSeedling(seedling.Seedling)
@@ -4277,12 +4332,34 @@ func marshalUnsealedSeedling(verbose bool,
 		if err != nil {
 			return nil, err
 		}
+
+		// Generate PSBT equivalent of the group virtual tx.
+		groupVirtualPacket, err := seedling.PendingAssetGroup.PSBT(
+			params,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("error getting group virtual "+
+				"PSBT for unsealed seedling: %w", err)
+		}
+
+		// Serialize PSBT to bytes.
+		var psbtBuf bytes.Buffer
+		err = groupVirtualPacket.Serialize(&psbtBuf)
+		if err != nil {
+			return nil, fmt.Errorf("error serializing group "+
+				"virtual PSBT for unsealed seedling: %w", err)
+		}
+
+		groupVirtualPsbt = base64.StdEncoding.EncodeToString(
+			psbtBuf.Bytes(),
+		)
 	}
 
 	return &mintrpc.UnsealedAsset{
-		Asset:           rpcSeedling,
-		GroupVirtualTx:  groupVirtualTx,
-		GroupKeyRequest: groupReq,
+		Asset:            rpcSeedling,
+		GroupVirtualTx:   groupVirtualTx,
+		GroupVirtualPsbt: groupVirtualPsbt,
+		GroupKeyRequest:  groupReq,
 	}, nil
 }
 
@@ -4296,13 +4373,15 @@ func marshalSeedlings(
 
 // marshalUnsealedSeedlings marshals the unsealed seedlings into the RPC
 // counterpart.
-func marshalUnsealedSeedlings(verbose bool,
+func marshalUnsealedSeedlings(params chaincfg.Params, verbose bool,
 	seedlings map[string]*tapgarden.UnsealedSeedling) (
 	[]*mintrpc.UnsealedAsset, error) {
 
 	rpcAssets := make([]*mintrpc.UnsealedAsset, 0, len(seedlings))
 	for _, seedling := range seedlings {
-		nextSeedling, err := marshalUnsealedSeedling(verbose, seedling)
+		nextSeedling, err := marshalUnsealedSeedling(
+			params, verbose, seedling,
+		)
 		if err != nil {
 			return nil, err
 		}
@@ -6745,12 +6824,12 @@ func marshalPeerAcceptedBuyQuotes(
 		}
 
 		rpcQuote := &rfqrpc.PeerAcceptedBuyQuote{
-			Peer:         quote.Peer.String(),
-			Id:           quote.ID[:],
-			Scid:         uint64(scid),
-			AssetAmount:  quote.Request.AssetMaxAmt,
-			AskAssetRate: rpcAskAssetRate,
-			Expiry:       uint64(quote.AssetRate.Expiry.Unix()),
+			Peer:           quote.Peer.String(),
+			Id:             quote.ID[:],
+			Scid:           uint64(scid),
+			AssetMaxAmount: quote.Request.AssetMaxAmt,
+			AskAssetRate:   rpcAskAssetRate,
+			Expiry:         uint64(quote.AssetRate.Expiry.Unix()),
 		}
 		rpcQuotes = append(rpcQuotes, rpcQuote)
 	}
@@ -7047,6 +7126,16 @@ func (r *rpcServer) SendPayment(req *tchrpc.SendPaymentRequest,
 		return fmt.Errorf("payment request and keysend custom " +
 			"records cannot be set at the same time")
 
+	// RFQ ID and keysend is set, which isn't a supported combination.
+	case req.RfqId != nil && isKeysend:
+		return fmt.Errorf("RFQ ID and keysend custom records " +
+			"cannot be set at the same time")
+
+	// A payment must either be a keysend payment or pay an invoice.
+	case !isKeysend && pReq.PaymentRequest == "":
+		return fmt.Errorf("payment request or keysend custom records " +
+			"must be set")
+
 	// There are custom records for the first hop set, which means RFQ
 	// negotiation has already happened (or this is a keysend payment and
 	// the correct asset amount is already encoded). So we don't need to do
@@ -7054,6 +7143,8 @@ func (r *rpcServer) SendPayment(req *tchrpc.SendPaymentRequest,
 	case len(firstHopRecords) > 0:
 		// Continue below.
 
+	// The user specified a custom RFQ ID for a quote that should be used
+	// for the payment.
 	case req.RfqId != nil:
 		// Check if the provided RFQ ID matches the expected length.
 		if len(req.RfqId) != 32 {
@@ -7084,8 +7175,24 @@ func (r *rpcServer) SendPayment(req *tchrpc.SendPaymentRequest,
 		// amount based on the asset-to-BTC conversion rate.
 		sellOrder := taprpc.MarshalAcceptedSellQuote(*quote)
 
+		// paymentMaxAmt is the maximum amount that the counterparty is
+		// expected to pay. This is the amount that the invoice is
+		// asking for plus the fee limit in milli-satoshis.
+		paymentMaxAmt, _, err := r.parseRequest(pReq)
+		if err != nil {
+			return err
+		}
+
+		// Check if the payment requires overpayment based on the quote.
+		err = checkOverpayment(
+			sellOrder, paymentMaxAmt, req.AllowOverpay,
+		)
+		if err != nil {
+			return err
+		}
+
 		// Send out the information about the quote on the stream.
-		err := stream.Send(&tchrpc.SendPaymentResponse{
+		err = stream.Send(&tchrpc.SendPaymentResponse{
 			Result: &tchrpc.SendPaymentResponse_AcceptedSellOrder{
 				AcceptedSellOrder: sellOrder,
 			},
@@ -7113,14 +7220,6 @@ func (r *rpcServer) SendPayment(req *tchrpc.SendPaymentRequest,
 
 	// The request wants to pay a specific invoice.
 	case pReq.PaymentRequest != "":
-		invoice, err := zpay32.Decode(
-			pReq.PaymentRequest, r.cfg.Lnd.ChainParams,
-		)
-		if err != nil {
-			return fmt.Errorf("error decoding payment request: %w",
-				err)
-		}
-
 		// The peer public key is optional if there is only a single
 		// asset channel.
 		var peerPubKey *route.Vertex
@@ -7151,35 +7250,11 @@ func (r *rpcServer) SendPayment(req *tchrpc.SendPaymentRequest,
 		// paymentMaxAmt is the maximum amount that the counterparty is
 		// expected to pay. This is the amount that the invoice is
 		// asking for plus the fee limit in milli-satoshis.
-		var paymentMaxAmt lnwire.MilliSatoshi
-		if invoice.MilliSat == nil {
-			amt, err := lnrpc.UnmarshallAmt(pReq.Amt, pReq.AmtMsat)
-			if err != nil {
-				return fmt.Errorf("error unmarshalling "+
-					"amount: %w", err)
-			}
-			if amt == 0 {
-				return errors.New("amount must be specified " +
-					"when paying a zero amount invoice")
-			}
-
-			paymentMaxAmt = amt
-		} else {
-			paymentMaxAmt = *invoice.MilliSat
-		}
-
-		// Calculate the fee limit that should be used for this payment.
-		feeLimit, err := lnrpc.UnmarshallAmt(
-			pReq.FeeLimitSat, pReq.FeeLimitMsat,
-		)
+		paymentMaxAmt, expiry, err := r.parseRequest(pReq)
 		if err != nil {
-			return fmt.Errorf("error unmarshalling fee limit: %w",
-				err)
+			return err
 		}
 
-		paymentMaxAmt += feeLimit
-
-		expiryTimestamp := invoice.Timestamp.Add(invoice.Expiry())
 		resp, err := r.AddAssetSellOrder(
 			ctx, &rfqrpc.AddAssetSellOrderRequest{
 				AssetSpecifier: &rfqrpc.AssetSpecifier{
@@ -7188,7 +7263,7 @@ func (r *rpcServer) SendPayment(req *tchrpc.SendPaymentRequest,
 					},
 				},
 				PaymentMaxAmt: uint64(paymentMaxAmt),
-				Expiry:        uint64(expiryTimestamp.Unix()),
+				Expiry:        uint64(expiry.Unix()),
 				PeerPubKey:    peerPubKey[:],
 				TimeoutSeconds: uint32(
 					rfq.DefaultTimeout.Seconds(),
@@ -7217,6 +7292,14 @@ func (r *rpcServer) SendPayment(req *tchrpc.SendPaymentRequest,
 
 		default:
 			return fmt.Errorf("unexpected response type: %T", r)
+		}
+
+		// Check if the payment requires overpayment based on the quote.
+		err = checkOverpayment(
+			acceptedQuote, paymentMaxAmt, req.AllowOverpay,
+		)
+		if err != nil {
+			return err
 		}
 
 		// Send out the information about the quote on the stream.
@@ -7318,6 +7401,99 @@ func (r *rpcServer) SendPayment(req *tchrpc.SendPaymentRequest,
 	}
 }
 
+// parseRequest parses the payment request and returns the payment maximum
+// amount and the expiry time.
+func (r *rpcServer) parseRequest(
+	req *routerrpc.SendPaymentRequest) (lnwire.MilliSatoshi, time.Time,
+	error) {
+
+	invoice, err := zpay32.Decode(req.PaymentRequest, r.cfg.Lnd.ChainParams)
+	if err != nil {
+		return 0, time.Time{}, fmt.Errorf("error decoding payment "+
+			"request: %w", err)
+	}
+
+	var paymentMaxAmt lnwire.MilliSatoshi
+	if invoice.MilliSat == nil {
+		amt, err := lnrpc.UnmarshallAmt(req.Amt, req.AmtMsat)
+		if err != nil {
+			return 0, time.Time{}, fmt.Errorf("error "+
+				"unmarshalling amount: %w", err)
+		}
+		if amt == 0 {
+			return 0, time.Time{}, errors.New("amount must be " +
+				"specified when paying a zero amount invoice")
+		}
+
+		paymentMaxAmt = amt
+	} else {
+		paymentMaxAmt = *invoice.MilliSat
+	}
+
+	// Calculate the fee limit that should be used for this payment.
+	feeLimit, err := lnrpc.UnmarshallAmt(
+		req.FeeLimitSat, req.FeeLimitMsat,
+	)
+	if err != nil {
+		return 0, time.Time{}, fmt.Errorf("error unmarshalling fee "+
+			"limit: %w", err)
+	}
+
+	paymentMaxAmt += feeLimit
+
+	expiry := invoice.Timestamp.Add(invoice.Expiry())
+	return paymentMaxAmt, expiry, nil
+}
+
+// checkOverpayment checks if paying a certain invoice amount requires
+// overpayment when using assets to pay, given the rate from the accepted quote
+// and the minimum non-dust HTLC amount dictated by the protocol.
+func checkOverpayment(quote *rfqrpc.PeerAcceptedSellQuote,
+	paymentAmount lnwire.MilliSatoshi, allowOverpay bool) error {
+
+	rateFP, err := rfqrpc.UnmarshalFixedPoint(quote.BidAssetRate)
+	if err != nil {
+		return fmt.Errorf("cannot unmarshal asset rate: %w", err)
+	}
+
+	// If the calculated asset amount is zero, we can't pay this amount
+	// using assets, so we'll reject the payment even if the user has set
+	// the override flag.
+	if quote.AssetAmount == 0 {
+		oneUnit := rfqmath.NewBigIntFixedPoint(1, 0)
+		oneUnitAsMSat := rfqmath.UnitsToMilliSatoshi(oneUnit, *rateFP)
+		return fmt.Errorf("rejecting payment of %v (invoice amount + "+
+			"user-defined routing fee limit), smallest payable "+
+			"amount with assets is equivalent to %v",
+			paymentAmount, oneUnitAsMSat)
+	}
+
+	srvrLog.Debugf("Checking if payment is economical (min transportable "+
+		"mSat: %d, paymentAmount: %d, allowOverpay=%v)",
+		quote.MinTransportableMsat, paymentAmount, allowOverpay)
+
+	// If the override flag is set, we ignore this check and return early.
+	if allowOverpay {
+		return nil
+	}
+
+	// If the payment amount is less than the minimal transportable amount
+	// dictated by the quote, we'll return an error to inform the user. They
+	// can still override this check if they want to proceed anyway.
+	if lnwire.MilliSatoshi(quote.MinTransportableMsat) > paymentAmount {
+		return fmt.Errorf("rejecting payment of %v (invoice "+
+			"amount + user-defined routing fee limit), minimum "+
+			"amount for an asset payment is %v mSAT with the "+
+			"current rate of %v units/BTC; override this check "+
+			"by specifying the allow_overpay flag",
+			paymentAmount, quote.MinTransportableMsat,
+			rateFP.String())
+	}
+
+	// The amount checks out, we can proceed with the payment.
+	return nil
+}
+
 // AddInvoice is a wrapper around lnd's lnrpc.AddInvoice method with asset
 // specific parameters. It allows RPC users to create invoices that correspond
 // to the specified asset amount.
@@ -7403,6 +7579,17 @@ func (r *rpcServer) AddInvoice(ctx context.Context,
 
 	default:
 		return nil, fmt.Errorf("unexpected response type: %T", r)
+	}
+
+	// If the invoice is for an asset unit amount smaller than the minimal
+	// transportable amount, we'll return an error, as it wouldn't be
+	// payable by the network.
+	if acceptedQuote.MinTransportableUnits > req.AssetAmount {
+		return nil, fmt.Errorf("cannot create invoice over %d asset "+
+			"units, as the minimal transportable amount is %d "+
+			"units with the current rate of %v units/BTC",
+			req.AssetAmount, acceptedQuote.MinTransportableUnits,
+			acceptedQuote.AskAssetRate)
 	}
 
 	// Now that we have the accepted quote, we know the amount in Satoshi
@@ -7735,4 +7922,147 @@ func (r *rpcServer) getInboundPolicy(ctx context.Context, chanID uint64,
 	}
 
 	return policy, nil
+}
+
+// assetInvoiceAmt calculates the amount of asset units to pay for an invoice
+// which is expressed in sats.
+func (r *rpcServer) assetInvoiceAmt(ctx context.Context,
+	targetAsset asset.Specifier,
+	invoiceAmt lnwire.MilliSatoshi) (uint64, error) {
+
+	oracle := r.cfg.PriceOracle
+
+	oracleResp, err := oracle.QueryAskPrice(
+		ctx, targetAsset, fn.None[uint64](), fn.Some(invoiceAmt),
+		fn.None[rfqmsg.AssetRate](),
+	)
+	if err != nil {
+		return 0, fmt.Errorf("error querying ask price: %w", err)
+	}
+	if oracleResp.Err != nil {
+		return 0, fmt.Errorf("error querying ask price: %w",
+			oracleResp.Err)
+	}
+
+	assetRate := oracleResp.AssetRate.Rate
+
+	numAssetUnits := rfqmath.MilliSatoshiToUnits(
+		invoiceAmt, assetRate,
+	).ScaleTo(0)
+
+	return numAssetUnits.ToUint64(), nil
+}
+
+// DecodeAssetPayReq decodes an incoming invoice, then uses the RFQ system to
+// map the BTC amount to the amount of asset units for the specified asset ID.
+func (r *rpcServer) DecodeAssetPayReq(ctx context.Context,
+	payReq *tchrpc.AssetPayReq) (*tchrpc.AssetPayReqResponse, error) {
+
+	if r.cfg.PriceOracle == nil {
+		return nil, fmt.Errorf("price oracle is not set")
+	}
+
+	// First, we'll perform some basic input validation.
+	switch {
+	case len(payReq.AssetId) == 0:
+		return nil, fmt.Errorf("asset ID must be specified")
+
+	case len(payReq.AssetId) != 32:
+		return nil, fmt.Errorf("asset ID must be 32 bytes, "+
+			"was %d", len(payReq.AssetId))
+
+	case len(payReq.PayReqString) == 0:
+		return nil, fmt.Errorf("payment request must be specified")
+	}
+
+	var (
+		resp    tchrpc.AssetPayReqResponse
+		assetID asset.ID
+	)
+
+	copy(assetID[:], payReq.AssetId)
+
+	// With the inputs validated, we'll first call out to lnd to decode the
+	// payment request.
+	rpcCtx, _, rawClient := r.cfg.Lnd.Client.RawClientWithMacAuth(ctx)
+	payReqInfo, err := rawClient.DecodePayReq(rpcCtx, &lnrpc.PayReqString{
+		PayReq: payReq.PayReqString,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("unable to fetch channel: %w", err)
+	}
+
+	resp.PayReq = payReqInfo
+
+	// Next, we'll fetch the information for this asset ID through the addr
+	// book. This'll automatically fetch the asset if needed.
+	assetGroup, err := r.cfg.AddrBook.QueryAssetInfo(ctx, assetID)
+	if err != nil {
+		return nil, fmt.Errorf("unable to fetch asset info for "+
+			"asset_id=%x: %w", assetID[:], err)
+	}
+
+	resp.GenesisInfo = &taprpc.GenesisInfo{
+		GenesisPoint: assetGroup.FirstPrevOut.String(),
+		AssetType:    taprpc.AssetType(assetGroup.Type),
+		Name:         assetGroup.Tag,
+		MetaHash:     assetGroup.MetaHash[:],
+		AssetId:      assetID[:],
+	}
+
+	// If this asset ID belongs to an asset group, then we'll display thiat
+	// information as well.
+	//
+	// nolint:lll
+	if assetGroup.GroupKey != nil {
+		groupInfo := assetGroup.GroupKey
+		resp.AssetGroup = &taprpc.AssetGroup{
+			RawGroupKey:     groupInfo.RawKey.PubKey.SerializeCompressed(),
+			TweakedGroupKey: groupInfo.GroupPubKey.SerializeCompressed(),
+			TapscriptRoot:   groupInfo.TapscriptRoot,
+		}
+
+		if len(groupInfo.Witness) != 0 {
+			resp.AssetGroup.AssetWitness, err = asset.SerializeGroupWitness(
+				groupInfo.Witness,
+			)
+			if err != nil {
+				return nil, err
+			}
+		}
+	}
+
+	// Now that we have the basic invoice information, we'll query the RFQ
+	// system to obtain a quote to send this amount of BTC. Note that this
+	// doesn't factor in the fee limit, so this attempts just to map the
+	// sats amount to an asset unit.
+	numMsat := lnwire.NewMSatFromSatoshis(
+		btcutil.Amount(payReqInfo.NumSatoshis),
+	)
+	targetAsset := asset.NewSpecifierOptionalGroupKey(
+		assetGroup.ID(), assetGroup.GroupKey,
+	)
+	invoiceAmt, err := r.assetInvoiceAmt(ctx, targetAsset, numMsat)
+	if err != nil {
+		return nil, fmt.Errorf("error deriving asset amount: %w", err)
+	}
+
+	resp.AssetAmount = invoiceAmt
+
+	// The final piece of information we need is the decimal display
+	// information for this asset ID.
+	decDisplay, err := r.DecDisplayForAssetID(ctx, assetID)
+	if err != nil {
+		return nil, err
+	}
+
+	resp.DecimalDisplay = fn.MapOptionZ(
+		decDisplay, func(d uint32) *taprpc.DecimalDisplay {
+			return &taprpc.DecimalDisplay{
+				DecimalDisplay: d,
+			}
+		},
+	)
+
+	return &resp, nil
 }
