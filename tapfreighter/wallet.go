@@ -70,6 +70,7 @@ type Wallet interface {
 	// selected assets.
 	FundAddressSend(ctx context.Context,
 		coinSelectType tapsend.CoinSelectType,
+		prevIDs []asset.PrevID,
 		receiverAddrs ...*address.Tap) (*FundedVPacket, error)
 
 	// FundPacket funds a virtual transaction, selecting assets to spend
@@ -241,6 +242,7 @@ type FundedVPacket struct {
 // NOTE: This is part of the Wallet interface.
 func (f *AssetWallet) FundAddressSend(ctx context.Context,
 	coinSelectType tapsend.CoinSelectType,
+	prevIDs []asset.PrevID,
 	receiverAddrs ...*address.Tap) (*FundedVPacket, error) {
 
 	// We start by creating a new virtual transaction that will be used to
@@ -256,6 +258,11 @@ func (f *AssetWallet) FundAddressSend(ctx context.Context,
 	fundDesc, err := tapsend.DescribeAddrs(receiverAddrs)
 	if err != nil {
 		return nil, fmt.Errorf("unable to describe recipients: %w", err)
+	}
+
+	// We need to constrain the prevIDs if they are provided.
+	if len(prevIDs) > 0 {
+		fundDesc.PrevIDs = prevIDs
 	}
 
 	fundDesc.CoinSelectType = coinSelectType
@@ -376,6 +383,7 @@ func (f *AssetWallet) FundPacket(ctx context.Context,
 		AssetSpecifier: fundDesc.AssetSpecifier,
 		MinAmt:         fundDesc.Amount,
 		CoinSelectType: fundDesc.CoinSelectType,
+		PrevIDs:        fundDesc.PrevIDs,
 	}
 
 	anchorVersion, err := tappsbt.CommitmentVersion(vPkt.Version)
@@ -696,18 +704,12 @@ func (f *AssetWallet) fundPacketWithInputs(ctx context.Context,
 				"key is spendable: %w", err)
 		}
 		if unSpendable && !fullValue {
-			changeScriptKey, err := f.cfg.KeyRing.DeriveNextKey(
-				ctx, asset.TaprootAssetsKeyFamily,
-			)
-			if err != nil {
-				return nil, err
-			}
-
-			// We'll assume BIP-0086 everywhere, and use the tweaked
-			// key from here on out.
-			changeOut.ScriptKey = asset.NewScriptKeyBip86(
-				changeScriptKey,
-			)
+			// re-use the scriptkey from the input asset
+			// the assumption above that the change should go to the
+			// operator of the pocket universe is incorrect/not useful
+			// in the context of Tajfi nostr users
+			changeOut.ScriptKey = vPkt.Inputs[0].Asset().ScriptKey
+			fmt.Printf("reused change script key: %v\n", changeOut.ScriptKey)
 		}
 
 		// For existing change outputs, we'll just update the amount

@@ -48,4 +48,4 @@ RUN sha256sum /bin/tapd /bin/tapcli > /shasums.txt \
 EXPOSE 10029 8089
 
 # Specify the start command and entrypoint as the tapd daemon.
-ENTRYPOINT ["tapd"]
+ENTRYPOINT ["tapd", "--network=testnet"]

@@ -6,7 +6,6 @@ import (
 	"fmt"
 
 	"github.com/lightninglabs/taproot-assets/mssmt"
-	"github.com/lightninglabs/taproot-assets/taprpc/universerpc"
 	unirpc "github.com/lightninglabs/taproot-assets/taprpc/universerpc"
 	"github.com/lightninglabs/taproot-assets/universe"
 	"golang.org/x/exp/maps"
@@ -104,7 +103,7 @@ func (r *RpcUniverseDiff) RootNode(ctx context.Context,
 	if err != nil {
 		return universe.Root{}, err
 	}
-	rootReq := &universerpc.AssetRootQuery{
+	rootReq := &unirpc.AssetRootQuery{
 		Id: uniID,
 	}
 
@@ -169,7 +168,7 @@ func (r *RpcUniverseDiff) FetchProofLeaf(ctx context.Context,
 		return nil, err
 	}
 
-	uProofs, err := r.conn.QueryProof(ctx, &universerpc.UniverseKey{
+	uProofs, err := r.conn.QueryProof(ctx, &unirpc.UniverseKey{
 		Id:      uniID,
 		LeafKey: marshalLeafKey(key),
 	})

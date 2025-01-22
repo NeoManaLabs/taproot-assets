@@ -17,7 +17,7 @@ VERSION_GO_FILE := "version.go"
 COMMIT := $(shell git describe --tags --dirty --always)
 
 GOBUILD := GOEXPERIMENT=loopvar GO111MODULE=on go build -v
-GOINSTALL := GOEXPERIMENT=loopvar GO111MODULE=on go install -v
+GOINSTALL := go install -v
 GOTEST := GOEXPERIMENT=loopvar GO111MODULE=on go test
 GOMOD := GO111MODULE=on go mod
 
@@ -60,10 +60,8 @@ DOCKER_TOOLS = docker run \
 
 GO_VERSION = 1.22.6
 
-GREEN := "\\033[0;32m"
-NC := "\\033[0m"
 define print
-	echo $(GREEN)$1$(NC)
+	echo $1
 endef
 
 default: scratch
@@ -112,8 +110,8 @@ install:
 
 release-install:
 	@$(call print, "Installing release tapd and tapcli.")
-	env CGO_ENABLED=0 $(GOINSTALL) -v -trimpath -ldflags="$(RELEASE_LDFLAGS)" -tags="$(RELEASE_TAGS)" $(PKG)/cmd/tapd
-	env CGO_ENABLED=0 $(GOINSTALL) -v -trimpath -ldflags="$(RELEASE_LDFLAGS)" -tags="$(RELEASE_TAGS)" $(PKG)/cmd/tapcli
+	$(GOINSTALL) -v -trimpath -ldflags="$(RELEASE_LDFLAGS)" -tags="$(RELEASE_TAGS)" $(PKG)/cmd/tapd
+	$(GOINSTALL) -v -trimpath -ldflags="$(RELEASE_LDFLAGS)" -tags="$(RELEASE_TAGS)" $(PKG)/cmd/tapcli
 
 release:
 	@$(call print, "Releasing tapd and tapcli binaries.")
