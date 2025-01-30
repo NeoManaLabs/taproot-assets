@@ -8,7 +8,7 @@ ENV GODEBUG netdns=cgo
 # image to be built from a specified Git state.  The default image
 # will use the Git tip of master by default.
 ARG checkout="main"
-ARG git_url="https://github.com/lightninglabs/taproot-assets"
+ARG git_url="https://github.com/NeoManaLabs/taproot-assets"
 
 # Install dependencies and build the binaries.
 RUN apk add --no-cache --update alpine-sdk \
@@ -38,6 +38,8 @@ RUN apk --no-cache add \
 # Copy the binaries from the builder image.
 COPY --from=builder /go/bin/tapcli /bin/
 COPY --from=builder /go/bin/tapd /bin/
+
+COPY lnd.cert /root/.tapd
 
 # Store the SHA256 hash of the binaries that were just produced for later
 # verification.
