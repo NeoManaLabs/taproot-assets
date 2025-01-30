@@ -21,7 +21,7 @@ RUN apk add --no-cache --update alpine-sdk \
 &&  make release-install
 
 # Start a new, final image.
-FROM alpine as final
+FROM public.ecr.aws/docker/library/alpine:latest as final
 
 # Define a root volume for data persistence.
 VOLUME /root/.tapd
