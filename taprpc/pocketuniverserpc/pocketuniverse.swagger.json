@@ -1,0 +1,175 @@
+{
+  "swagger": "2.0",
+  "info": {
+    "title": "pocketuniverserpc/pocketuniverse.proto",
+    "version": "version not set"
+  },
+  "tags": [
+    {
+      "name": "PocketUniverse"
+    }
+  ],
+  "consumes": [
+    "application/json"
+  ],
+  "produces": [
+    "application/json"
+  ],
+  "paths": {
+    "/v1/taproot-assets/pocket-universe/apply-signature": {
+      "post": {
+        "summary": "ApplyExternalSignature applies an externally-generated signature to\na virtual PSBT.",
+        "operationId": "PocketUniverse_ApplyExternalSignature",
+        "responses": {
+          "200": {
+            "description": "A successful response.",
+            "schema": {
+              "$ref": "#/definitions/pocketuniverserpcApplyExternalSigResponse"
+            }
+          },
+          "default": {
+            "description": "An unexpected error response.",
+            "schema": {
+              "$ref": "#/definitions/rpcStatus"
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "body",
+            "in": "body",
+            "required": true,
+            "schema": {
+              "$ref": "#/definitions/pocketuniverserpcApplyExternalSigRequest"
+            }
+          }
+        ],
+        "tags": [
+          "PocketUniverse"
+        ]
+      }
+    },
+    "/v1/taproot-assets/pocket-universe/compute-sighash": {
+      "post": {
+        "summary": "ComputeVirtualTxSigHash computes the sighash that needs to be signed\nfor a virtual transaction, allowing external signing.",
+        "operationId": "PocketUniverse_ComputeVirtualTxSigHash",
+        "responses": {
+          "200": {
+            "description": "A successful response.",
+            "schema": {
+              "$ref": "#/definitions/pocketuniverserpcComputeSigHashResponse"
+            }
+          },
+          "default": {
+            "description": "An unexpected error response.",
+            "schema": {
+              "$ref": "#/definitions/rpcStatus"
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "body",
+            "in": "body",
+            "required": true,
+            "schema": {
+              "$ref": "#/definitions/pocketuniverserpcComputeSigHashRequest"
+            }
+          }
+        ],
+        "tags": [
+          "PocketUniverse"
+        ]
+      }
+    }
+  },
+  "definitions": {
+    "pocketuniverserpcApplyExternalSigRequest": {
+      "type": "object",
+      "properties": {
+        "funded_psbt": {
+          "type": "string",
+          "format": "byte",
+          "title": "The funded virtual PSBT"
+        },
+        "signatures": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "format": "byte"
+          },
+          "title": "The schnorr signatures, one per input"
+        }
+      }
+    },
+    "pocketuniverserpcApplyExternalSigResponse": {
+      "type": "object",
+      "properties": {
+        "signed_psbt": {
+          "type": "string",
+          "format": "byte",
+          "title": "The signed virtual PSBT"
+        },
+        "signed_inputs": {
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "title": "The indices of signed inputs"
+        }
+      }
+    },
+    "pocketuniverserpcComputeSigHashRequest": {
+      "type": "object",
+      "properties": {
+        "funded_psbt": {
+          "type": "string",
+          "format": "byte",
+          "title": "The funded virtual PSBT"
+        }
+      }
+    },
+    "pocketuniverserpcComputeSigHashResponse": {
+      "type": "object",
+      "properties": {
+        "sighashes": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "format": "byte"
+          },
+          "title": "The sighashes that need to be signed, one per input"
+        }
+      }
+    },
+    "protobufAny": {
+      "type": "object",
+      "properties": {
+        "@type": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": {}
+    },
+    "rpcStatus": {
+      "type": "object",
+      "properties": {
+        "code": {
+          "type": "integer",
+          "format": "int32"
+        },
+        "message": {
+          "type": "string"
+        },
+        "details": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "$ref": "#/definitions/protobufAny"
+          }
+        }
+      }
+    }
+  }
+}

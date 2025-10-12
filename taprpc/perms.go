@@ -155,6 +155,14 @@ var (
 			Entity: "assets",
 			Action: "write",
 		}},
+		"/pocketuniverserpc.PocketUniverse/ComputeVirtualTxSigHash": {{
+			Entity: "assets",
+			Action: "read",
+		}},
+		"/pocketuniverserpc.PocketUniverse/ApplyExternalSignature": {{
+			Entity: "assets",
+			Action: "write",
+		}},
 		"/mintrpc.Mint/MintAsset": {{
 			Entity: "mint",
 			Action: "write",

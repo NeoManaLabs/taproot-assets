@@ -48,6 +48,7 @@ import (
 	"github.com/lightninglabs/taproot-assets/taprpc"
 	wrpc "github.com/lightninglabs/taproot-assets/taprpc/assetwalletrpc"
 	"github.com/lightninglabs/taproot-assets/taprpc/mintrpc"
+	"github.com/lightninglabs/taproot-assets/taprpc/pocketuniverserpc"
 	"github.com/lightninglabs/taproot-assets/taprpc/priceoraclerpc"
 	"github.com/lightninglabs/taproot-assets/taprpc/rfqrpc"
 	tchrpc "github.com/lightninglabs/taproot-assets/taprpc/tapchannelrpc"
@@ -191,6 +192,7 @@ type rpcServer struct {
 	tchrpc.UnimplementedTaprootAssetChannelsServer
 	tapdevrpc.UnimplementedTapDevServer
 	unirpc.UnimplementedUniverseServer
+	pocketuniverserpc.UnimplementedPocketUniverseServer
 
 	interceptor signal.Interceptor
 
@@ -261,6 +263,7 @@ func (r *rpcServer) RegisterWithGrpcServer(
 	tchrpc.RegisterTaprootAssetChannelsServer(registrar, r)
 	unirpc.RegisterUniverseServer(registrar, r)
 	tapdevrpc.RegisterGrpcServer(registrar, r)
+	pocketuniverserpc.RegisterPocketUniverseServer(registrar, r)
 
 	return nil
 }
@@ -308,6 +311,13 @@ func (r *rpcServer) RegisterWithRestProxy(restCtx context.Context,
 	}
 
 	err = unirpc.RegisterUniverseHandlerFromEndpoint(
+		restCtx, restMux, restProxyDest, restDialOpts,
+	)
+	if err != nil {
+		return err
+	}
+
+	err = pocketuniverserpc.RegisterPocketUniverseHandlerFromEndpoint(
 		restCtx, restMux, restProxyDest, restDialOpts,
 	)
 	if err != nil {

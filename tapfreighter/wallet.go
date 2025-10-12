@@ -134,6 +134,9 @@ type Wallet interface {
 	// ReleaseCoins releases/unlocks coins that were previously leased and
 	// makes them available for coin selection again.
 	ReleaseCoins(ctx context.Context, utxoOutpoints ...wire.OutPoint) error
+
+	// WitnessValidator returns the witness validator used by the wallet.
+	WitnessValidator() tapscript.WitnessValidator
 }
 
 // AddrBook is an interface that provides access to the address book.
@@ -1335,6 +1338,11 @@ func (f *AssetWallet) ReleaseCoins(ctx context.Context,
 	utxoOutpoints ...wire.OutPoint) error {
 
 	return f.cfg.CoinSelector.ReleaseCoins(ctx, utxoOutpoints...)
+}
+
+// WitnessValidator returns the witness validator from the wallet config.
+func (f *AssetWallet) WitnessValidator() tapscript.WitnessValidator {
+	return f.cfg.WitnessValidator
 }
 
 // addAnchorPsbtInputs adds anchor information from all inputs to the PSBT

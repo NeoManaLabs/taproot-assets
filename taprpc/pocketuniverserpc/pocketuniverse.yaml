@@ -1,0 +1,12 @@
+type: google.api.Service
+config_version: 3
+
+http:
+  rules:
+    - selector: pocketuniverserpc.PocketUniverse.ComputeVirtualTxSigHash
+      post: "/v1/taproot-assets/pocket-universe/compute-sighash"
+      body: "*"
+
+    - selector: pocketuniverserpc.PocketUniverse.ApplyExternalSignature
+      post: "/v1/taproot-assets/pocket-universe/apply-signature"
+      body: "*"

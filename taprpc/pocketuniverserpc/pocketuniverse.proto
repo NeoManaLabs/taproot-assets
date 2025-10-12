@@ -1,0 +1,43 @@
+syntax = "proto3";
+
+package pocketuniverserpc;
+
+option go_package = "github.com/lightninglabs/taproot-assets/taprpc/pocketuniverserpc";
+
+service PocketUniverse {
+    /* ComputeVirtualTxSigHash computes the sighash that needs to be signed
+    for a virtual transaction, allowing external signing. */
+    rpc ComputeVirtualTxSigHash (ComputeSigHashRequest)
+        returns (ComputeSigHashResponse);
+
+    /* ApplyExternalSignature applies an externally-generated signature to
+    a virtual PSBT. */
+    rpc ApplyExternalSignature (ApplyExternalSigRequest)
+        returns (ApplyExternalSigResponse);
+}
+
+message ComputeSigHashRequest {
+    // The funded virtual PSBT
+    bytes funded_psbt = 1;
+}
+
+message ComputeSigHashResponse {
+    // The sighashes that need to be signed, one per input
+    repeated bytes sighashes = 1;
+}
+
+message ApplyExternalSigRequest {
+    // The funded virtual PSBT
+    bytes funded_psbt = 1;
+
+    // The schnorr signatures, one per input
+    repeated bytes signatures = 2;
+}
+
+message ApplyExternalSigResponse {
+    // The signed virtual PSBT
+    bytes signed_psbt = 1;
+
+    // The indices of signed inputs
+    repeated uint32 signed_inputs = 2;
+}
